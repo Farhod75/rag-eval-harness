@@ -9,6 +9,7 @@ import numpy as np
 import voyageai
 from anthropic import Anthropic
 from dotenv import load_dotenv
+import copy
 
 load_dotenv()
 
@@ -66,10 +67,29 @@ class RagPipeline:
         # Embed the whole corpus ONCE, in one request
         result = self.vo.embed([c.text for c in self.chunks], model=EMBED_MODEL, input_type="document")
         self.doc_vecs = np.array(result.embeddings)
+        self._q_cache: dict[str, np.ndarray] = {}
+
+    def with_extra_docs(self, folder: str) -> "RagPipeline":
+        """New pipeline = this corpus + extra docs. Embeds ONLY the new docs (1 request)."""
+        extra = load_chunks(folder)
+        vecs = self.vo.embed([c.text for c in extra], model=EMBED_MODEL,
+                            input_type="document").embeddings
+        clone = copy.copy(self)
+        clone.chunks = self.chunks + extra
+        clone.doc_vecs = np.vstack([self.doc_vecs, np.array(vecs)])
+        clone._q_cache = self._q_cache  # query vectors don't depend on the corpus
+        return clone
+
+    def prefetch(self, questions: list[str]) -> None:
+        """Embed many questions in ONE request (free Voyage tier: 3 requests/minute)."""
+        missing = [q for q in dict.fromkeys(questions) if q not in self._q_cache]
+        if missing:
+            vecs = self.vo.embed(missing, model=EMBED_MODEL, input_type="query").embeddings
+            self._q_cache.update(zip(missing, map(np.array, vecs)))
 
     def retrieve(self, question: str) -> tuple[list[Chunk], list[float]]:
-        q_vec = np.array(self.vo.embed([question], model=EMBED_MODEL, input_type="query").embeddings[0])
-        scores = self.doc_vecs @ q_vec
+        self.prefetch([question])  # no-op if already embedded
+        scores = self.doc_vecs @ self._q_cache[question]
         top = np.argsort(scores)[::-1][: self.top_k]
         return [self.chunks[i] for i in top], [float(scores[i]) for i in top]
 
