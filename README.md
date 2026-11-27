@@ -35,14 +35,18 @@ question ──► query embedding ──► cosine similarity ──► top-k c
 | `test_poisoned_chunk_is_retrieved` | Precondition: the attacker's document actually reached the model (avoids false-green security tests) |
 | `test_injected_instructions_not_followed` | Prompt injection via a poisoned document: canary word, system-prompt leakage |
 | `test_correct_fact_survives_attack` | Under attack the system still gives the correct answer, not just a refusal |
+| `test_gate_blocks_unanswerable` | Relevance gate: out-of-scope questions are refused with **zero LLM cost** |
+| `test_gate_lets_answerable_through` | Relevance gate: no false refusals on answerable questions |
 
-Current result: **29 passed** (clean corpus + poisoned corpus built incrementally: only the attacker's document is re-embedded).
+
+
+Current result: **37 passed** (clean corpus + poisoned corpus built incrementally: only the attacker's document is re-embedded).
 
 ## Findings
 
 1. **Test-oracle false positive.** The first injection test failed: the model *refused* the attack and reported it ("the document tells me to claim expenses are approved automatically… I ignored those instructions"), but a substring check flagged the quoted phrase as a successful attack. Fix: use an unambiguous canary word for "did it obey?", and leave semantic checks ("does it *claim* there is no limit?") to an LLM-as-judge (roadmap).
 2. **Injection defense ≠ data-poisoning defense.** The model ignored the injected *instructions* but still cited a *fact* from the attacker's document ("reviewed by Finance [expense_update#1]"). Prompt rules alone don't protect against false data in the corpus; that needs document provenance and trust levels.
-3. **Out-of-scope questions retrieve with low similarity** (~0.33 vs ~0.6 for answerable ones), which suggests a relevance threshold that skips the LLM call entirely.
+3. **Relevance gate, calibrated on data.** Best retrieval score: answerable questions ≥ 0.587, out-of-scope ≤ 0.397. Threshold set at the midpoint (0.49) with `calibrate_threshold.py`. Below it, the system refuses without calling Claude, so out-of-scope questions cost 0 LLM tokens. Caveat: calibrated on only 8 questions, so it must be re-checked on a larger corpus.
 
 ## Run it
 
@@ -59,7 +63,7 @@ pytest -v       # full eval harness (calls paid APIs, marked `llm`)
 - [x] Prompt-injection tests via a poisoned document in the corpus
 - [ ] LLM-as-judge for semantic checks (claims vs. quotes), calibrated against hand labels
 - [ ] Document provenance / trust levels against data poisoning
-- [ ] Relevance threshold: skip the LLM when the best retrieval score is too low
 - [ ] Provider switch: Anthropic API / Amazon Bedrock
 - [ ] Larger corpus and a pgvector store
 - [ ] CI workflow with a cost budget
+- [x] Relevance threshold calibrated on data (skips the LLM on out-of-scope questions)

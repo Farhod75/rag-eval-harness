@@ -1,6 +1,7 @@
 """Minimal RAG pipeline: chunk -> embed -> retrieve -> generate with citations."""
 from __future__ import annotations
 
+import copy
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,12 +10,14 @@ import numpy as np
 import voyageai
 from anthropic import Anthropic
 from dotenv import load_dotenv
-import copy
 
 load_dotenv()
 
 EMBED_MODEL = "voyage-4-lite"
 NOT_FOUND = "I don't know based on the provided documents."
+# Calibrated with calibrate_threshold.py on 8 golden questions:
+# lowest answerable 0.587, highest unanswerable 0.397 -> midpoint 0.49
+DEFAULT_MIN_SCORE = 0.49
 
 SYSTEM_PROMPT = f"""You answer questions about company policy using ONLY the documents inside <documents>.
 Rules:
@@ -38,6 +41,7 @@ class RagAnswer:
     scores: list[float]
     input_tokens: int
     output_tokens: int
+    llm_called: bool = True
 
 
 def load_chunks(folder: str | Path) -> list[Chunk]:
@@ -58,7 +62,9 @@ def load_chunks(folder: str | Path) -> list[Chunk]:
 
 
 class RagPipeline:
-    def __init__(self, folder: str = "data/handbook", top_k: int = 2, model: str | None = None):
+    def __init__(self, folder: str = "data/handbook", top_k: int = 2,
+                 model: str | None = None, min_score: float | None = None):
+        self.min_score = min_score  # None = gate off (always call the LLM)
         self.chunks = load_chunks(folder)
         self.top_k = top_k
         self.model = model or os.environ["CLAUDE_MODEL"]
@@ -73,11 +79,17 @@ class RagPipeline:
         """New pipeline = this corpus + extra docs. Embeds ONLY the new docs (1 request)."""
         extra = load_chunks(folder)
         vecs = self.vo.embed([c.text for c in extra], model=EMBED_MODEL,
-                            input_type="document").embeddings
+                             input_type="document").embeddings
         clone = copy.copy(self)
         clone.chunks = self.chunks + extra
         clone.doc_vecs = np.vstack([self.doc_vecs, np.array(vecs)])
         clone._q_cache = self._q_cache  # query vectors don't depend on the corpus
+        return clone
+
+    def with_min_score(self, min_score: float = DEFAULT_MIN_SCORE) -> "RagPipeline":
+        """Same pipeline, but skip the LLM when retrieval finds nothing relevant."""
+        clone = copy.copy(self)
+        clone.min_score = min_score
         return clone
 
     def prefetch(self, questions: list[str]) -> None:
@@ -95,6 +107,9 @@ class RagPipeline:
 
     def answer(self, question: str) -> RagAnswer:
         sources, scores = self.retrieve(question)
+        if self.min_score is not None and scores[0] < self.min_score:
+            # Nothing relevant retrieved: refuse without paying for an LLM call
+            return RagAnswer(question, NOT_FOUND, sources, scores, 0, 0, llm_called=False)
         context = "\n".join(f'<document id="{c.id}">\n{c.text}\n</document>' for c in sources)
         msg = self.llm.messages.create(
             model=self.model,
