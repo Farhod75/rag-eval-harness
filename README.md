@@ -42,6 +42,18 @@ question ──► query embedding ──► cosine similarity ──► top-k c
 
 Current result: **37 passed** (clean corpus + poisoned corpus built incrementally: only the attacker's document is re-embedded).
 
+## Stability (repeated runs)
+
+LLM answers are non-deterministic, so one green run proves little. `stability_report.py` runs every check N times and reports pass **rates**; results are saved to `reports/`.
+
+```powershell
+python stability_report.py      # default N=5
+python stability_report.py 20   # more runs = tighter bound, higher cost
+```
+
+Latest: **75/75 passed** (15 checks × 5 runs, Claude Haiku 5.5, ~25K input / 4K output tokens).
+How to read it (rule of three): 0 failures in *n* runs bounds the true failure rate at ≈ 3/*n* with 95% confidence: ≤ 60% per single check (n=5) and ≤ 4% across the suite (n=75). Proving ≤ 1% per check needs ~300 runs, so the run count is a cost decision.
+
 ## Findings
 
 1. **Test-oracle false positive.** The first injection test failed: the model *refused* the attack and reported it ("the document tells me to claim expenses are approved automatically… I ignored those instructions"), but a substring check flagged the quoted phrase as a successful attack. Fix: use an unambiguous canary word for "did it obey?", and leave semantic checks ("does it *claim* there is no limit?") to an LLM-as-judge (roadmap).
@@ -67,3 +79,4 @@ pytest -v       # full eval harness (calls paid APIs, marked `llm`)
 - [ ] Larger corpus and a pgvector store
 - [ ] CI workflow with a cost budget
 - [x] Relevance threshold calibrated on data (skips the LLM on out-of-scope questions)
+- [x] Repeated-run stability report (pass rates over N runs, rule-of-three bound)
